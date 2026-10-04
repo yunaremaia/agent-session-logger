@@ -1,6 +1,7 @@
 """Session search and indexing."""
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Optional
 
@@ -29,28 +30,29 @@ class Indexer:
     def index_session(self, session_id: str):
         """Index a session's content for full-text search."""
         messages = self.store.get_messages(session_id)
-        conn = sqlite3.connect(self.store.db_path)
-        
-        # Create FTS5 table if not exists
-        conn.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-                session_id,
-                role,
-                content,
-                content=messages,
-                content_rowid=id
-            )
-        """)
-        
-        # Index messages
-        for msg in messages:
-            conn.execute(
-                "INSERT INTO messages_fts (session_id, role, content) VALUES (?, ?, ?)",
-                (session_id, msg["role"], msg["content"])
-            )
-        
-        conn.commit()
-        conn.close()
+
+        # closing() releases the connection even when an INSERT raises. Without
+        # it the connection survived the exception still holding its write
+        # transaction, and every later write failed with `database is locked`.
+        with closing(sqlite3.connect(self.store.db_path)) as conn:
+            with conn:
+                # Create FTS5 table if not exists
+                conn.execute("""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                        session_id,
+                        role,
+                        content,
+                        content=messages,
+                        content_rowid=id
+                    )
+                """)
+
+                # Index messages
+                for msg in messages:
+                    conn.execute(
+                        "INSERT INTO messages_fts (session_id, role, content) VALUES (?, ?, ?)",
+                        (session_id, msg["role"], msg["content"])
+                    )
 
 
 class Searcher:
@@ -62,24 +64,23 @@ class Searcher:
 
     def search(self, query: str, limit: int = 10) -> list[dict]:
         """Search sessions by keyword."""
-        conn = sqlite3.connect(self.store.db_path)
-        conn.row_factory = sqlite3.Row
-        
-        # LIKE search with escaped metacharacters so that % and _ are matched
-        # as literal characters (fixes false positives when searching for
-        # identifiers, file paths, or printf-style format strings).
-        escaped = _like_escape(query)
-        rows = conn.execute("""
-            SELECT DISTINCT s.id as session_id, s.started_at as timestamp,
-                   substr(m.content, 1, 200) as snippet
-            FROM messages m
-            JOIN sessions s ON m.session_id = s.id
-            WHERE m.content LIKE ? ESCAPE '\\'
-            ORDER BY s.started_at DESC
-            LIMIT ?
-        """, (f"%{escaped}%", limit)).fetchall()
-        
-        conn.close()
+        with closing(sqlite3.connect(self.store.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            # LIKE search with escaped metacharacters so that % and _ are
+            # matched as literal characters (fixes false positives when
+            # searching for identifiers, file paths, or printf-style format
+            # strings).
+            escaped = _like_escape(query)
+            rows = conn.execute("""
+                SELECT DISTINCT s.id as session_id, s.started_at as timestamp,
+                       substr(m.content, 1, 200) as snippet
+                FROM messages m
+                JOIN sessions s ON m.session_id = s.id
+                WHERE m.content LIKE ? ESCAPE '\\'
+                ORDER BY s.started_at DESC
+                LIMIT ?
+            """, (f"%{escaped}%", limit)).fetchall()
+
         return [dict(row) for row in rows]
 
     def get_session_summary(self, session_id: str) -> Optional[dict]:
