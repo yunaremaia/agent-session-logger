@@ -73,7 +73,10 @@ def list(project: str):
         console.print("[yellow]No sessions recorded yet[/yellow]")
         return
     for s in sessions:
-        console.print(f"[cyan]{escape(s['id'])}[/cyan]  [dim]{s['agent']}  {s['started_at']}[/dim]")
+        console.print(
+            f"[cyan]{escape(s['id'])}[/cyan]  "
+            f"[dim]{escape(s['agent'])}  {s['started_at']}[/dim]"
+        )
 
 
 @cli.command()
