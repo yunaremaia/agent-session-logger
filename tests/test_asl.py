@@ -380,3 +380,84 @@ class TestSearchRendersMarkupVerbatim:
         body = [ln for ln in result.stdout.splitlines() if "needle" in ln]
         assert body, result.stdout
         assert len(body[0]) > 100  # not rewrapped at 80 columns
+
+
+class TestListRendersAgentVerbatim:
+    """#21 follow-up: `list` reaches the same Rich sink and must escape every field.
+
+    The markup fix escaped `session_id` in `search` and `id` in `list`, but left
+    the user-supplied `agent` raw inside the same `[dim]` tag. An agent name comes
+    from the `--agent` CLI option, so it is just as untrusted as session content.
+    """
+
+    def _run(self, *args, env=None):
+        return subprocess.run(
+            [sys.executable, "-m", "asl.cli", *args],
+            capture_output=True, text=True, timeout=60, env=env,
+        )
+
+    @pytest.fixture
+    def cli_project(self, tmp_path):
+        project = tmp_path / "cli_project"
+        project.mkdir()
+        s = Store(str(project))
+        s.init_db()
+        s.create_session("s1", "claude-code")
+        return project
+
+    @staticmethod
+    def _rename_agent(project, agent):
+        """Write the agent name straight to the DB.
+
+        create_session() cannot be used here: it builds the session filename from
+        the agent name, so an agent containing '/' hits an unrelated path bug and
+        the test would fail for the wrong reason. The stored value is what `list`
+        renders, so updating the row isolates the markup defect.
+        """
+        import sqlite3
+        db = Path(project) / ".asl" / "sessions.db"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute("UPDATE sessions SET agent = ? WHERE id = ?", (agent, "s1"))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_list_survives_unmatched_closing_tag_in_agent(self, cli_project):
+        """A stray [/] in an agent name must not raise MarkupError and kill the command."""
+        self._rename_agent(cli_project, "claude-code [/] bold")
+
+        env = dict(os.environ, PYTHONPATH=str(cli_project))
+        result = self._run("list", "--project", str(cli_project), env=env)
+
+        assert result.returncode == 0, result.stderr
+        assert "[/] bold" in result.stdout
+
+    def test_list_preserves_markup_in_agent_name(self, cli_project):
+        """The agent name must survive verbatim instead of being eaten as a tag."""
+        self._rename_agent(cli_project, "[notbold]my-agent")
+
+        env = dict(os.environ, PYTHONPATH=str(cli_project))
+        result = self._run("list", "--project", str(cli_project), env=env)
+
+        assert result.returncode == 0, result.stderr
+        assert "[notbold]my-agent" in result.stdout
+
+    def test_search_preserves_markup_in_session_id(self, cli_project):
+        """Same sink via session_id in `search`: the already-fixed path, pinned."""
+        import sqlite3
+        db = Path(cli_project) / ".asl" / "sessions.db"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute("UPDATE sessions SET id = ? WHERE id = ?", ("[notbold]s1", "s1"))
+            conn.commit()
+        finally:
+            conn.close()
+        s = Store(str(cli_project))
+        s.append_message("[notbold]s1", "user", "needle in the body")
+
+        env = dict(os.environ, PYTHONPATH=str(cli_project))
+        result = self._run("search", "needle", "--project", str(cli_project), env=env)
+
+        assert result.returncode == 0, result.stderr
+        assert "[notbold]s1" in result.stdout
