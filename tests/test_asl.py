@@ -461,3 +461,49 @@ class TestListRendersAgentVerbatim:
 
         assert result.returncode == 0, result.stderr
         assert "[notbold]s1" in result.stdout
+
+
+class TestSessionFileNameIsOnePathComponent:
+    """`session_id` / `agent` are caller-supplied and become a path component.
+
+    Before the fix, `create_session` interpolated both straight into the file
+    name, so a `/` in either one made `touch()` look for a subdirectory that
+    never existed and raise `FileNotFoundError`. A name that resolved outside
+    `.asl/sessions` would have written outside the project.
+    """
+
+    @pytest.mark.parametrize("session_id", ["2026/10/04", "..", "../evil", "a/b/c"])
+    def test_session_id_with_slash_still_creates_a_file(self, store, session_id):
+        sf = store.create_session(session_id, "claude-code")
+
+        assert sf.exists()
+        assert sf.parent == store.sessions_dir
+
+    @pytest.mark.parametrize("agent", ["../evil", "team/agent", ".."])
+    def test_agent_with_slash_still_creates_a_file(self, store, agent):
+        sf = store.create_session("s1", agent)
+
+        assert sf.exists()
+        assert sf.parent == store.sessions_dir
+
+    def test_name_stays_inside_the_project(self, tmp_project):
+        """The written file must land under the project, not beside it."""
+        s = Store(str(tmp_project))
+        s.init_db()
+        outside = tmp_project.parent / "escaped.jsonl"
+
+        sf = s.create_session("../../escaped", "../../escaped")
+
+        assert sf.parent == s.sessions_dir
+        assert not outside.exists()
+        assert store_path_is_inside(sf, tmp_project)
+
+    def test_ordinary_names_are_unchanged(self, store):
+        """The guard must not mangle the ids the tool is actually used with."""
+        sf = store.create_session("test-123", "claude-code")
+
+        assert sf.name.endswith("_claude-code_test-123.jsonl")
+
+
+def store_path_is_inside(path, root):
+    return Path(os.path.realpath(path)).is_relative_to(Path(os.path.realpath(root)))

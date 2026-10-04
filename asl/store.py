@@ -2,11 +2,23 @@
 
 import json
 import os
+import re
 import sqlite3
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+# A session id and an agent name are caller-supplied strings that end up as one
+# path component of the session file name. Anything that could add a directory
+# level (`/`, `\`, a drive letter, a NUL) is collapsed to `_` so the result is
+# always a single child of `sessions_dir`.
+_UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _safe_name(value: str) -> str:
+    """Reduce a caller-supplied id/name to a single safe path component."""
+    return _UNSAFE_NAME.sub("_", value) or "_"
 
 
 class Store:
@@ -55,8 +67,11 @@ class Store:
     def create_session(self, session_id: str, agent: str) -> Path:
         """Create a new session file."""
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        filename = f"{timestamp}_{agent}_{session_id}.jsonl"
+        filename = f"{timestamp}_{_safe_name(agent)}_{_safe_name(session_id)}.jsonl"
         session_file = self.sessions_dir / filename
+        # The sanitising above makes this a fixed invariant, not a hope: a name
+        # that escapes `sessions_dir` would write outside the project.
+        assert session_file.parent == self.sessions_dir, session_file
         session_file.touch()
 
         with closing(sqlite3.connect(self.db_path)) as conn:
